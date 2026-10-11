@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = ["crates/os-core", "crates/osctl", "crates/os-bar"]
+default-members = ["crates/osctl"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+os-core = { path = "crates/os-core" }
+
+[profile.release]
+opt-level = 3
+debug = false
+
+# The bar should feel like the product even in dev builds.
+[profile.dev.package."*"]
+opt-level = 2
