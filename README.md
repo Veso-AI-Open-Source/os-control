@@ -131,6 +131,7 @@ crates/os-bar     the bar, a small native window built with GPUI
 helpers/ask.swift the gate panel, one Swift file
 tests/            live checks on the real desktop
 demo/             the script that recorded the demo above
+WORKLOG.md        the work so far, the snags, and the next steps
 ```
 
 ```
@@ -145,6 +146,8 @@ When a control does not show up the way you expect, `osctl call inspect '{"app":
 ## How it's built
 
 This codebase was written with agentic AI coding, end to end, in one morning. Claude Code wrote the tools, then used them. Its first real job was in a web portal: it found a setting, staged it, checked a recording by downloading and transcribing it, and stopped before Save because it had been asked to find out, not to change.
+
+[WORKLOG.md](WORKLOG.md) records what was built, what broke, how it was checked, and what comes next.
 
 Each claim in this README has a check behind it. The unit tests cover the gate rules, the key parser, and the protocol. The live checks drive real apps. One of them shows the gate panel, sends it a posted click and an accessibility press, and passes only if both are refused.
 
