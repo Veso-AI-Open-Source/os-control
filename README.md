@@ -1,6 +1,6 @@
 # OS Control
 
-**Eyes and hands for Claude Code on your Mac. With brakes it cannot reach.**
+**Eyes and hands for Claude Code on your Mac.**
 
 ![The bar reads an invoice in a background Safari window. Told to pay it, it stops at the money panel and no payment is made.](docs/demo.gif)
 
