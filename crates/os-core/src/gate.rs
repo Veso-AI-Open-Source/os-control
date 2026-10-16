@@ -296,6 +296,28 @@ fn is_return(chord: &str) -> bool {
     chord == "return"
 }
 
+/// Proof that the gate looked at an act and let it through.
+///
+/// Only [`admit`] can make one, and every function that sends input or
+/// changes an element asks for one. So an act that skips the gate does not
+/// compile:
+///
+/// ```compile_fail
+/// let t = os_core::gate::Ticket { _sealed: () };
+/// ```
+pub struct Ticket {
+    _sealed: (),
+}
+
+/// Runs the gate for one act. When a rule hits, `decide` asks the person;
+/// a ticket comes back only when the act may go ahead.
+pub fn admit(policy: &Policy, act: &Act, decide: impl FnOnce(Hit) -> Result<(), String>) -> Result<Ticket, String> {
+    if let Some(hit) = evaluate(policy, act) {
+        decide(hit)?;
+    }
+    Ok(Ticket { _sealed: () })
+}
+
 pub fn evaluate(policy: &Policy, act: &Act) -> Option<Hit> {
     // Looking is never gated.
     if act.verb == "scroll" {
@@ -421,6 +443,7 @@ fn helper() -> Option<std::path::PathBuf> {
 
 /// Shows the panel: it never takes the keyboard, and Allow takes only a
 /// real click. Any exit code it does not define is a no.
+#[allow(clippy::disallowed_methods)] // the gate panel is a separate helper process by design
 fn ask_with_panel(
     helper: &std::path::Path,
     gate: Gate,

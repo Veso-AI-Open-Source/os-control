@@ -1,12 +1,13 @@
 //! The tools. One `Executor` lives for one session and holds what the model
 //! last saw, so `click 12` means the twelfth line of the last `see`.
 
-use crate::apps::{self, AppInfo};
+use crate::apps::{self, AppInfo, Seen};
 use crate::ax::{self, Element, Node, WalkOpts};
-use crate::gate::{self, Act, Answer, Gate, Labeled, Policy};
+use crate::gate::{self, Act, Answer, Gate, Labeled, Policy, Ticket};
 use crate::geom::{Rect, View};
 use crate::input::{self, Button, Chord};
 use crate::screen;
+use crate::verify::{self, Outcome, Way};
 use crate::state;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -184,7 +185,7 @@ impl Executor {
     fn app_arg(&self, args: &Value) -> Result<Option<AppInfo>, String> {
         match s(args, "app") {
             None => Ok(None),
-            Some(q) => apps::find(q).into_iter().next().map(Some).ok_or_else(|| {
+            Some(q) => apps::find(q)?.into_iter().next().map(Some).ok_or_else(|| {
                 format!("no running app matches \"{q}\". Open it with the app tool first.")
             }),
         }
@@ -202,9 +203,9 @@ impl Executor {
         el.set_timeout(1.5);
         if self.woken.insert(app.pid) {
             // Electron honours the first flag. Chromium browsers need the second.
-            let _ = el.set_flag("AXManualAccessibility", true);
+            ax::wake_with(&el, ax::WakeFlag::Manual);
             if is_browser(&app.bundle) {
-                let _ = el.set_flag("AXEnhancedUserInterface", true);
+                ax::wake_with(&el, ax::WakeFlag::Enhanced);
                 sleep(Duration::from_millis(250));
             }
         }
@@ -303,59 +304,103 @@ impl Executor {
 
     /// Stops for the person when a hard stop applies. `what` is one plain
     /// sentence that says what is about to happen.
-    fn pass_gate(&mut self, act: &Act, what: &str) -> Result<(), String> {
+    fn pass_gate(&mut self, act: &Act, what: &str) -> Result<Ticket, String> {
         let policy = self.policy.as_ref().map_err(|e| e.clone())?;
-        let Some(hit) = gate::evaluate(policy, act) else { return Ok(()) };
-        let now = Instant::now();
-        if let Some(until) = self.passes.remove(&hit.gate) {
-            if now < until {
-                state::audit(json!({ "event": "gate", "gate": hit.gate.id(), "answer": "confirmed earlier", "summary": what }));
-                return Ok(());
-            }
-        }
-        if let Some(place) = &hit.place {
-            if self.windows.get(&(hit.gate, place.clone())).is_some_and(|until| now < *until) {
-                return Ok(());
-            }
-        }
-        let mut summary = format!("{what}\n\nApp: {}", act.app_name);
-        if !act.window.is_empty() {
-            summary.push_str(&format!("\nWindow: {}", ax::clean(&act.window, 80)));
-        }
-        if !act.url.is_empty() {
-            summary.push_str(&format!("\nPage: {}", ax::clean(&act.url, 100)));
-        }
-        summary.push_str(&format!("\nWhy this stops: {}.", hit.why));
-        match gate::ask(hit.gate, &summary, hit.place.as_deref(), self.gate_timeout) {
-            Answer::Once => Ok(()),
-            Answer::Minutes(m) => {
-                if let Some(place) = hit.place {
-                    self.windows.insert((hit.gate, place), now + Duration::from_secs(m * 60));
+        let passes = &mut self.passes;
+        let windows = &mut self.windows;
+        let timeout = self.gate_timeout;
+        gate::admit(policy, act, |hit| {
+            let now = Instant::now();
+            if let Some(until) = passes.remove(&hit.gate) {
+                if now < until {
+                    state::audit(json!({ "event": "gate", "gate": hit.gate.id(), "answer": "confirmed earlier", "summary": what }));
+                    return Ok(());
                 }
-                Ok(())
             }
-            Answer::Deny => Err(format!(
-                "The user did not approve this. It is a hard stop: {}. {DENIED}",
-                hit.gate.title()
+            if let Some(place) = &hit.place {
+                if windows.get(&(hit.gate, place.clone())).is_some_and(|until| now < *until) {
+                    return Ok(());
+                }
+            }
+            let mut summary = format!("{what}\n\nApp: {}", act.app_name);
+            if !act.window.is_empty() {
+                summary.push_str(&format!("\nWindow: {}", ax::clean(&act.window, 80)));
+            }
+            if !act.url.is_empty() {
+                summary.push_str(&format!("\nPage: {}", ax::clean(&act.url, 100)));
+            }
+            summary.push_str(&format!("\nWhy this stops: {}.", hit.why));
+            match gate::ask(hit.gate, &summary, hit.place.as_deref(), timeout) {
+                Answer::Once => Ok(()),
+                Answer::Minutes(m) => {
+                    if let Some(place) = hit.place {
+                        windows.insert((hit.gate, place), now + Duration::from_secs(m * 60));
+                    }
+                    Ok(())
+                }
+                Answer::Deny => Err(format!(
+                    "The user did not approve this. It is a hard stop: {}. {DENIED}",
+                    hit.gate.title()
+                )),
+                Answer::Stop => Err(STOPPED.into()),
+            }
+        })
+    }
+
+    /// Brings an app to the front and checks that it got there. Tries the
+    /// accessibility API, then AppKit, then LaunchServices.
+    fn bring_front(&mut self, t: &Ticket, app: &AppInfo) -> Result<&'static str, String> {
+        let ways: Vec<Way> = vec![
+            ("accessibility", Duration::from_millis(250), Box::new(|| apps::raise_ax(t, app))),
+            ("AppKit", Duration::from_millis(600), Box::new(|| apps::raise_appkit(t, app))),
+            ("LaunchServices", Duration::from_millis(1200), Box::new(|| apps::raise_launch_services(t, app))),
+        ];
+        match verify::ladder(ways, || apps::front_is(app.pid)) {
+            Outcome::Done { by, .. } => {
+                sleep(Duration::from_millis(60));
+                Ok(by)
+            }
+            Outcome::NoEffect { tried } => Err(format!(
+                "could not bring {} to the front. Tried {}; another app kept the focus.",
+                app.name,
+                tried.join(", ")
             )),
-            Answer::Stop => Err(STOPPED.into()),
+            Outcome::Unobservable { why, .. } => {
+                Err(format!("asked {} to come to the front, but could not confirm it: {why}.", app.name))
+            }
         }
     }
 
-    fn bring_front(&mut self, app: &AppInfo) -> Result<(), String> {
-        let is_front = |pid: i32| apps::frontmost().is_some_and(|f| f.pid == pid);
-        if is_front(app.pid) {
-            return Ok(());
-        }
-        apps::activate(app)?;
-        for _ in 0..25 {
-            sleep(Duration::from_millis(40));
-            if is_front(app.pid) {
-                sleep(Duration::from_millis(80));
-                return Ok(());
+    /// A fingerprint of what a person would see in the app's front window.
+    /// Two equal fingerprints mean nothing visible changed.
+    fn digest(&mut self, app: &AppInfo, target: Option<&Element>) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let app_el = Element::app(app.pid);
+        app_el.elements("AXWindows").len().hash(&mut h);
+        if let Some(w) = ax::focus_window(&app_el) {
+            w.text("AXTitle").hash(&mut h);
+            let opts = WalkOpts { max_visited: 400, max_depth: 25, budget: Duration::from_millis(150), clip: None };
+            for n in ax::walk(&w, &opts).nodes {
+                (&n.role, &n.label, &n.value, n.enabled, n.selected, n.focused).hash(&mut h);
             }
         }
-        Err(format!("could not bring {} to the front", app.name))
+        if let Some(t) = target {
+            t.text("AXValue").hash(&mut h);
+        }
+        ax::focused_element().map(|f| f.hash()).hash(&mut h);
+        h.finish()
+    }
+
+    /// Waits up to half a second for the fingerprint to move.
+    fn change_note(&mut self, app: &AppInfo, target: Option<&Element>, before: u64) -> &'static str {
+        for wait in [90u64, 160, 250] {
+            sleep(Duration::from_millis(wait));
+            if self.digest(app, target) != before {
+                return "Verified: the window changed.";
+            }
+        }
+        "No change was seen within half a second. Call see to check."
     }
 
     // ---- see ----------------------------------------------------------
@@ -672,7 +717,7 @@ impl Executor {
 
         match self.resolve(args)? {
             Target::Node { el, short, label, actionable, pid } => {
-                let app = apps::info(pid);
+                let app = apps::resolve(pid).ok_or("the app of that element is gone. Call see again.")?;
                 let mut act = self.act("click", &app);
                 let (chain, in_control) = ax::label_chain(&el);
                 act.labels = chain.into_iter().map(|l| Labeled { label: l, control: in_control || actionable }).collect();
@@ -680,16 +725,20 @@ impl Executor {
                     act.labels.push(Labeled { label: label.clone(), control: actionable || in_control });
                 }
                 let what = Self::describe_target(&short, &label);
-                self.pass_gate(&act, &format!("Click {what}."))?;
+                let t = self.pass_gate(&act, &format!("Click {what}."))?;
 
                 let plain = button == Button::Left && count == 1 && flags == 0 && !force_mouse;
-                if plain && el.actions().iter().any(|a| a == "AXPress") && el.perform("AXPress").is_ok() {
-                    return done(format!("Pressed {what} in {}.", app.name));
+                if plain && el.actions().iter().any(|a| a == "AXPress") {
+                    let before = self.digest(&app, Some(&el));
+                    if el.perform(&t, "AXPress").is_ok() {
+                        let note = self.change_note(&app, Some(&el), before);
+                        return done(format!("Pressed {what} in {}. {note}", app.name));
+                    }
                 }
-                self.bring_front(&app)?;
+                self.bring_front(&t, &app)?;
                 let mut frame = el.frame().ok_or("that element no longer exists. Call see again.")?;
                 if !in_view(&frame) {
-                    let _ = el.perform("AXScrollToVisible");
+                    let _ = el.perform(&t, "AXScrollToVisible");
                     sleep(Duration::from_millis(250));
                     frame = el.frame().unwrap_or(frame);
                     if !in_view(&frame) {
@@ -699,21 +748,24 @@ impl Executor {
                 let (x, y) = frame.center();
                 if let Some(owner) = Element::at_point(x, y).and_then(|h| h.pid()) {
                     if owner != pid {
-                        return Err(format!("{what} is covered by a window of {}. Nothing was clicked.", apps::info(owner).name));
+                        let name = apps::resolve(owner).map(|a| a.name).unwrap_or_else(|| "another app".into());
+                        return Err(format!("{what} is covered by a window of {name}. Nothing was clicked."));
                     }
                 }
-                input::click(x, y, button, count, flags);
-                done(format!("Clicked {what} in {} with the mouse.", app.name))
+                let before = self.digest(&app, Some(&el));
+                input::click(&t, x, y, button, count, flags);
+                let note = self.change_note(&app, Some(&el), before);
+                done(format!("Clicked {what} in {} with the mouse. {note}", app.name))
             }
             Target::Point { x, y } => {
                 if (0.0..=3.0).contains(&x) && (0.0..=3.0).contains(&y) {
                     return Err("that point is the stop corner. Pick another point.".into());
                 }
                 let hit = Element::at_point(x, y);
-                let owner = hit.as_ref().and_then(|h| h.pid()).map(apps::info);
+                let owner = hit.as_ref().and_then(|h| h.pid()).and_then(apps::resolve);
                 let app = match owner {
-                    Some(a) if !a.name.is_empty() => a,
-                    _ => apps::frontmost().ok_or("could not tell which app is in front")?,
+                    Some(a) => a,
+                    None => apps::frontmost().ok_or("could not tell which app is in front")?,
                 };
                 if let Some(q) = s(args, "app") {
                     if !apps::matches(&app, q) {
@@ -728,9 +780,11 @@ impl Executor {
                     what = Self::describe_target(&d.short, chain.first().map(String::as_str).unwrap_or(""));
                     act.labels = chain.into_iter().map(|l| Labeled { label: l, control: in_control }).collect();
                 }
-                self.pass_gate(&act, &format!("Click {what}."))?;
-                input::click(x, y, button, count, flags);
-                done(format!("Clicked {what} in {} with the mouse.", app.name))
+                let t = self.pass_gate(&act, &format!("Click {what}."))?;
+                let before = self.digest(&app, hit.as_ref());
+                input::click(&t, x, y, button, count, flags);
+                let note = self.change_note(&app, hit.as_ref(), before);
+                done(format!("Clicked {what} in {} with the mouse. {note}", app.name))
             }
         }
     }
@@ -763,30 +817,62 @@ impl Executor {
             let Some(Target::Node { el, short, label, pid, .. }) = target else {
                 return Err("set needs an id or a label".into());
             };
-            let app = apps::info(pid);
+            let app = apps::resolve(pid).ok_or("the app of that element is gone. Call see again.")?;
             let mut act = self.act("type", &app);
             act.focus_role = short.clone();
             self.hide_text = short == "securefield";
             let what = Self::describe_target(&short, &label);
-            self.pass_gate(&act, &format!("Set the text of {what} ({chars} characters)."))?;
-            el.set_text("AXValue", &text)?;
-            return done(format!("Set {what} in {} to {chars} characters.", app.name));
+            let t = self.pass_gate(&act, &format!("Set the text of {what} ({chars} characters)."))?;
+            el.set_text(&t, "AXValue", &text)?;
+            let note = match el.text("AXValue") {
+                Some(v) if v == text => "Verified: the field holds the new text.",
+                Some(_) => "The field shows different text than was set. Call see to check.",
+                None => "Could not read the field back to check.",
+            };
+            return done(format!("Set {what} in {} to {chars} characters. {note}", app.name));
         }
 
-        if let Some(Target::Node { el, pid, .. }) = &target {
-            let app = apps::info(*pid);
-            self.bring_front(&app)?;
-            if el.set_flag("AXFocused", true).is_err() {
-                if let Some(f) = el.frame() {
-                    let (x, y) = f.center();
-                    input::click(x, y, Button::Left, 1, 0);
+        // With a target, put the focus on it and check it got there before
+        // typing a single key.
+        let mut focus_note = String::new();
+        if let Some(Target::Node { el, pid, short, label, .. }) = &target {
+            let app = apps::resolve(*pid).ok_or("the app of that element is gone. Call see again.")?;
+            let what = Self::describe_target(short, label);
+            let act = self.act("focus", &app);
+            let ft = self.pass_gate(&act, &format!("Put the focus on {what}."))?;
+            self.bring_front(&ft, &app)?;
+            let ways: Vec<Way> = vec![
+                ("accessibility focus", Duration::from_millis(250), Box::new(|| el.set_flag(&ft, "AXFocused", true))),
+                (
+                    "a mouse click",
+                    Duration::from_millis(400),
+                    Box::new(|| {
+                        let (x, y) = el.frame().ok_or("the element is gone")?.center();
+                        input::click(&ft, x, y, Button::Left, 1, 0);
+                        Ok(())
+                    }),
+                ),
+            ];
+            match verify::ladder(ways, || focus_on(el)) {
+                Outcome::Done { by, .. } => focus_note = format!("Focus checked ({by}). "),
+                Outcome::NoEffect { tried } => {
+                    return Err(format!(
+                        "could not put the focus on {what}. Tried {}. Nothing was typed.",
+                        tried.join(", ")
+                    ))
+                }
+                Outcome::Unobservable { why, .. } => {
+                    return Err(format!("could not confirm the focus is on {what}: {why}. Nothing was typed."))
                 }
             }
-            sleep(Duration::from_millis(90));
         }
 
         // Keys go to whatever app is in front. Check it is the one meant.
-        let front = apps::frontmost().ok_or("could not tell which app is in front")?;
+        let front = match apps::front() {
+            Seen::Yes(a) => a,
+            Seen::No => return Err("no app is in front. Nothing was typed.".into()),
+            Seen::Unknown(why) => return Err(format!("could not tell which app is in front: {why}. Nothing was typed.")),
+        };
         if let Some(Target::Node { pid, .. }) = &target {
             if front.pid != *pid {
                 return Err(format!("{} took the focus before typing. Nothing was typed.", front.name));
@@ -797,30 +883,35 @@ impl Executor {
             }
         }
 
-        let focus = ax::focused_element().map(|f| f.describe()).unwrap_or_default();
+        let focused = ax::focused_element();
+        let focus = focused.as_ref().map(|f| f.describe()).unwrap_or_default();
         self.hide_text = focus.short == "securefield";
         let field = Self::describe_target(if focus.short.is_empty() { "field" } else { &focus.short }, &focus.label);
+        let had = focused.as_ref().and_then(|f| f.text("AXValue")).map(|v| v.chars().count());
         let mut act = self.act("type", &front);
         act.focus_role = focus.short.clone();
-        self.pass_gate(&act, &format!("Type {chars} characters into {field}."))?;
+        let t = self.pass_gate(&act, &format!("Type {chars} characters into {field}."))?;
 
-        if enter || text.contains('\n') {
+        let rt = if enter || text.contains('\n') {
             let mut ret = act.clone();
             ret.verb = "key".into();
             ret.chord = Some("return".into());
             ret.labels = self.default_button(&front);
-            self.pass_gate(&ret, &format!("Press Return in {field}."))?;
-        }
+            Some(self.pass_gate(&ret, &format!("Press Return in {field}."))?)
+        } else {
+            None
+        };
 
         let key = |name: &str| input::parse_chord(name).expect("built-in chord");
-        if b(args, "clear", false) {
-            input::press(&key("cmd+a"));
+        let clear = b(args, "clear", false);
+        if clear {
+            input::press(&t, &key("cmd+a"));
             sleep(Duration::from_millis(50));
         }
 
         let mut typed = 0usize;
         let mut buf = String::new();
-        let still_front = |pid: i32| apps::frontmost().is_some_and(|f| f.pid == pid);
+        let still_front = |pid: i32| apps::front_is(pid) == Seen::Yes(());
         let flush = |buf: &mut String, typed: &mut usize| -> Result<(), String> {
             if buf.is_empty() {
                 return Ok(());
@@ -828,7 +919,7 @@ impl Executor {
             if !still_front(front.pid) {
                 return Err(format!("The focus left {} after {} characters. Typing stopped there.", front.name, *typed));
             }
-            input::type_text(buf);
+            input::type_text(&t, buf);
             *typed += buf.chars().count();
             buf.clear();
             Ok(())
@@ -840,7 +931,11 @@ impl Executor {
                     if !still_front(front.pid) {
                         return Err(format!("The focus left {} after {typed} characters. Typing stopped there.", front.name));
                     }
-                    input::press(&key(if ch == '\n' { "return" } else { "tab" }));
+                    let k = key(if ch == '\n' { "return" } else { "tab" });
+                    match (&rt, ch) {
+                        (Some(r), '\n') => input::press(r, &k),
+                        _ => input::press(&t, &k),
+                    }
                     typed += 1;
                     sleep(Duration::from_millis(30));
                 }
@@ -853,17 +948,42 @@ impl Executor {
             }
         }
         flush(&mut buf, &mut typed)?;
-        if enter {
+        if let (true, Some(r)) = (enter, &rt) {
             sleep(Duration::from_millis(40));
             if !still_front(front.pid) {
                 return Err(format!("The focus left {} before Return. The text was typed. Return was not pressed.", front.name));
             }
-            input::press(&key("return"));
+            input::press(r, &key("return"));
+        }
+
+        // Say what the field held before, and read it back when the text
+        // stayed in one field.
+        let mut notes = focus_note;
+        if let (Some(n), false) = (had, clear) {
+            if n > 0 {
+                notes.push_str(&format!("The field already held {n} characters; the new text went in with them. "));
+            }
+        }
+        let one_field = !text.contains('\n') && !text.contains('\t');
+        if one_field {
+            sleep(Duration::from_millis(60));
+            let field_el = match &target {
+                Some(Target::Node { el, .. }) => Some(el.clone()),
+                _ => focused.clone(),
+            };
+            let shown = field_el.as_ref().and_then(|f| f.text("AXValue"));
+            notes.push_str(match shown {
+                Some(v) if v.contains(text.trim_end()) => "Verified: the field shows the text.",
+                Some(_) if enter => "The field changed after Return; call see to check.",
+                Some(_) => "The field does not show the text. Call see to check.",
+                None => "Could not read the field back to check.",
+            });
         }
         done(format!(
-            "Typed {chars} characters into {field} in {}{}.",
+            "Typed {chars} characters into {field} in {}{}. {}",
             front.name,
-            if enter { ", then pressed Return" } else { "" }
+            if enter { ", then pressed Return" } else { "" },
+            notes.trim_end()
         ))
     }
 
@@ -898,11 +1018,11 @@ impl Executor {
                 if chord.name == "return" {
                     act.labels = self.default_button(&front);
                 }
-                self.pass_gate(&act, &format!("Press {}.", chord.name))?;
-                if !apps::frontmost().is_some_and(|f| f.pid == front.pid) {
+                let t = self.pass_gate(&act, &format!("Press {}.", chord.name))?;
+                if apps::front_is(front.pid) != Seen::Yes(()) {
                     return Err(format!("The focus left {} after {pressed} key presses. The rest were not sent.", front.name));
                 }
-                input::press(chord);
+                input::press(&t, chord);
                 pressed += 1;
                 sleep(Duration::from_millis(45));
             }
@@ -935,20 +1055,26 @@ impl Executor {
         if dx == 0 && dy == 0 {
             return Err("give dy or dx in lines. Positive dy shows what is further down.".into());
         }
-        let (x, y) = if Self::has_target(args) {
-            let t = self.resolve(args)?;
-            self.point_of(&t)?
-        } else {
-            let app = self.target_app(args)?;
-            let app_el = self.app_element(&app);
-            ax::focus_window(&app_el)
-                .and_then(|w| w.frame())
-                .map(|f| f.center())
-                .ok_or(format!("{} has no window to scroll", app.name))?
+        let target = if Self::has_target(args) { Some(self.resolve(args)?) } else { None };
+        let app = match &target {
+            Some(Target::Node { pid, .. }) => apps::resolve(*pid).ok_or("the app of that element is gone. Call see again.")?,
+            _ => self.target_app(args)?,
         };
-        input::move_to(x, y);
+        let (x, y) = match &target {
+            Some(t) => self.point_of(t)?,
+            None => {
+                let app_el = self.app_element(&app);
+                ax::focus_window(&app_el)
+                    .and_then(|w| w.frame())
+                    .map(|f| f.center())
+                    .ok_or(format!("{} has no window to scroll", app.name))?
+            }
+        };
+        let act = self.act("scroll", &app);
+        let t = self.pass_gate(&act, "Scroll.")?;
+        input::move_to(&t, x, y);
         sleep(Duration::from_millis(50));
-        input::scroll(dx.clamp(-200, 200), dy.clamp(-200, 200));
+        input::scroll(&t, dx.clamp(-200, 200), dy.clamp(-200, 200));
         let (ix, iy) = self.view.to_image(x, y);
         done(format!("Scrolled dy {dy}, dx {dx} at {},{}.", ix.round() as i64, iy.round() as i64))
     }
@@ -962,10 +1088,10 @@ impl Executor {
         let a = self.point_of(&from)?;
         let z = self.point_of(&to)?;
         let app = match &from {
-            Target::Node { pid, .. } => apps::info(*pid),
+            Target::Node { pid, .. } => apps::resolve(*pid).ok_or("the app of that element is gone. Call see again.")?,
             Target::Point { x, y } => Element::at_point(*x, *y)
                 .and_then(|h| h.pid())
-                .map(apps::info)
+                .and_then(apps::resolve)
                 .or_else(apps::frontmost)
                 .ok_or("could not tell which app is in front")?,
         };
@@ -973,11 +1099,11 @@ impl Executor {
         if let Some(h) = Element::at_point(z.0, z.1) {
             act.drop_labels = ax::label_chain(&h).0;
         }
-        self.pass_gate(&act, "Drag an item and drop it.")?;
+        let t = self.pass_gate(&act, "Drag an item and drop it.")?;
         if let Target::Node { .. } = from {
-            self.bring_front(&app)?;
+            self.bring_front(&t, &app)?;
         }
-        input::drag(a, z);
+        input::drag(&t, a, z);
         let (ax1, ay1) = self.view.to_image(a.0, a.1);
         let (ax2, ay2) = self.view.to_image(z.0, z.1);
         done(format!(
@@ -994,7 +1120,7 @@ impl Executor {
 
     fn one_app(&self, args: &Value) -> Result<AppInfo, String> {
         let q = s(args, "name").or_else(|| s(args, "bundle")).ok_or("name or bundle is required")?;
-        let found = apps::find(q);
+        let found = apps::find(q)?;
         match found.len() {
             0 => Err(format!("no running app matches \"{q}\"")),
             1 => Ok(found[0].clone()),
@@ -1024,7 +1150,7 @@ impl Executor {
                 apps::open(name, target, background)?;
                 if let Some(q) = name {
                     for _ in 0..40 {
-                        if let Some(a) = apps::find(q).into_iter().next() {
+                        if let Some(a) = apps::find(q).ok().and_then(|v| v.into_iter().next()) {
                             sleep(Duration::from_millis(300));
                             return done(format!("{} is open{}.", a.name, if background { " in the background" } else { "" }));
                         }
@@ -1036,15 +1162,47 @@ impl Executor {
             }
             "activate" => {
                 let a = self.one_app(args)?;
-                self.bring_front(&a)?;
-                done(format!("{} is in front.", a.name))
+                let act = self.act("app", &a);
+                let t = self.pass_gate(&act, &format!("Bring {} to the front.", a.name))?;
+                let by = self.bring_front(&t, &a)?;
+                done(format!("{} is in front. Verified ({by}).", a.name))
             }
             "hide" => {
                 let a = self.one_app(args)?;
-                if apps::hide(a.pid) {
-                    done(format!("{} is hidden.", a.name))
-                } else {
-                    Err(format!("could not hide {}", a.name))
+                let act = self.act("app", &a);
+                let t = self.pass_gate(&act, &format!("Hide {}.", a.name))?;
+                let mut keys = act.clone();
+                keys.verb = "key".into();
+                keys.chord = Some("cmd+h".into());
+                let kt = self.pass_gate(&keys, &format!("Press cmd+h in {}.", a.name))?;
+                let cmd_h = input::parse_chord("cmd+h")?;
+                let ways: Vec<Way> = vec![
+                    ("accessibility", Duration::from_millis(400), Box::new(|| apps::hide_ax(&t, &a))),
+                    ("AppKit", Duration::from_millis(500), Box::new(|| apps::hide_appkit(&t, &a))),
+                    (
+                        "cmd+h",
+                        Duration::from_millis(600),
+                        Box::new(|| {
+                            apps::raise_launch_services(&t, &a)?;
+                            for _ in 0..20 {
+                                if apps::front_is(a.pid) == Seen::Yes(()) {
+                                    input::press(&kt, &cmd_h);
+                                    return Ok(());
+                                }
+                                sleep(Duration::from_millis(50));
+                            }
+                            Err("it would not come to the front, so cmd+h was not pressed".into())
+                        }),
+                    ),
+                ];
+                match verify::ladder(ways, || apps::hidden(a.pid)) {
+                    Outcome::Done { by, .. } => done(format!("{} is hidden. Verified ({by}).", a.name)),
+                    Outcome::NoEffect { tried } => {
+                        Err(format!("could not hide {}. Tried {}; it stayed on screen.", a.name, tried.join(", ")))
+                    }
+                    Outcome::Unobservable { why, .. } => {
+                        Err(format!("asked {} to hide, but could not confirm it: {why}.", a.name))
+                    }
                 }
             }
             "quit" => {
@@ -1052,7 +1210,9 @@ impl Executor {
                 if own_ancestors().contains(&a.pid) {
                     return Err(format!("{} runs this session. Quitting it would end the session. Nothing was done.", a.name));
                 }
-                if apps::quit(a.pid) {
+                let act = self.act("app", &a);
+                let t = self.pass_gate(&act, &format!("Quit {}.", a.name))?;
+                if apps::quit(&t, a.pid) {
                     done(format!("Asked {} to quit. It may ask to save first.", a.name))
                 } else {
                     Err(format!("could not quit {}", a.name))
@@ -1141,6 +1301,35 @@ impl Executor {
 }
 
 /// Pids of this process and the chain of processes that started it.
+/// Whether the keyboard focus is on `target`, inside it, or on the field
+/// it wraps. Unknown when nothing reports the focus.
+fn focus_on(target: &Element) -> Seen<()> {
+    let Some(f) = ax::focused_element() else {
+        return Seen::Unknown("no element reports the keyboard focus".into());
+    };
+    if f.same(target) {
+        return Seen::Yes(());
+    }
+    let mut up = f.element("AXParent");
+    for _ in 0..4 {
+        match up {
+            Some(e) if e.same(target) => return Seen::Yes(()),
+            Some(e) => up = e.element("AXParent"),
+            None => break,
+        }
+    }
+    let mut up = target.element("AXParent");
+    for _ in 0..2 {
+        match up {
+            Some(e) if e.same(&f) => return Seen::Yes(()),
+            Some(e) => up = e.element("AXParent"),
+            None => break,
+        }
+    }
+    Seen::No
+}
+
+#[allow(clippy::disallowed_methods)] // reads one parent pid; to replace with proc_pidinfo
 fn own_ancestors() -> Vec<i32> {
     let mut out = vec![std::process::id() as i32];
     let mut pid = std::process::id() as i32;

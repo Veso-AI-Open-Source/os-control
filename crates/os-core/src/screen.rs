@@ -126,6 +126,7 @@ fn run(cmd: &mut Command) -> Result<(), String> {
     }
 }
 
+#[allow(clippy::disallowed_methods)] // image resize with sips; output is a file, not parsed text
 fn resize(src: &Path, dst: &Path, w: u32, h: u32) -> Result<(), String> {
     run(Command::new("/usr/bin/sips")
         .args(["-s", "format", "jpeg", "-s", "formatOptions", "70", "-z"])
@@ -145,6 +146,7 @@ fn grant_hint(err: String) -> String {
 }
 
 /// One display as a JPEG of exactly `w` by `h` pixels, pointer included.
+#[allow(clippy::disallowed_methods)] // screenshots come from screencapture; output is an image file
 pub fn capture_display(d: &Display, w: u32, h: u32, dir: &Path) -> Result<Vec<u8>, String> {
     let raw = temp_path(dir, "raw");
     let small = temp_path(dir, "out");
@@ -162,6 +164,7 @@ pub fn capture_display(d: &Display, w: u32, h: u32, dir: &Path) -> Result<Vec<u8
 
 /// A rectangle of the screen at full detail, for reading small text.
 /// `rect` is in global screen points. Returns the JPEG and its pixel size.
+#[allow(clippy::disallowed_methods)] // screenshots come from screencapture; output is an image file
 pub fn capture_region(
     rect: Rect,
     native: f64,

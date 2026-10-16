@@ -15,3 +15,4 @@ pub mod input;
 pub mod screen;
 pub mod state;
 pub mod tools;
+pub mod verify;
