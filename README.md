@@ -135,7 +135,7 @@ WORKLOG.md        the work so far, the snags, and the next steps
 ```
 
 ```
-make test                      44 unit tests. They touch nothing on screen.
+make test                      51 tests. They touch nothing on screen.
 make live                      Live checks. Calculator only, in the background.
 python3 tests/foreground.py    Real key presses. Takes the focus for two seconds.
 make demo                      Records docs/demo.gif.
@@ -167,7 +167,7 @@ Bounded work, each item with a clear test:
 
 ## Contributing
 
-Pick an item from Next, or bring your own. A change to the gates needs a unit test in `gate.rs`. A change to a tool needs a live check. Say what you ran.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for the branches, the CI pipeline, and the privacy rules. Pick an item from Next, or bring your own. A change to the gates needs a unit test in `gate.rs`. A change to a tool needs a live check. Say what you ran.
 
 ## Credits
 
