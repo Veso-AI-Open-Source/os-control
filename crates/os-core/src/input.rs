@@ -1,6 +1,7 @@
 //! Mouse and keyboard events, posted the way a real device posts them.
 
 use crate::ffi::*;
+use crate::gate::Ticket;
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -73,7 +74,12 @@ pub fn idle_seconds() -> f64 {
     }
 }
 
-pub fn move_to(x: f64, y: f64) {
+/// Moves the pointer. Takes a gate ticket like every other input.
+pub fn move_to(_t: &Ticket, x: f64, y: f64) {
+    move_raw(x, y);
+}
+
+fn move_raw(x: f64, y: f64) {
     let src = Source::new();
     let ev = unsafe {
         CGEventCreateMouseEvent(src.0, kCGEventMouseMoved, CGPoint { x, y }, kCGMouseButtonLeft)
@@ -82,7 +88,7 @@ pub fn move_to(x: f64, y: f64) {
     post(ev);
 }
 
-pub fn click(x: f64, y: f64, button: Button, count: u32, flags: u64) {
+pub fn click(_t: &Ticket, x: f64, y: f64, button: Button, count: u32, flags: u64) {
     let (down, up, b) = match button {
         Button::Left => (kCGEventLeftMouseDown, kCGEventLeftMouseUp, kCGMouseButtonLeft),
         Button::Right => (kCGEventRightMouseDown, kCGEventRightMouseUp, kCGMouseButtonRight),
@@ -90,7 +96,7 @@ pub fn click(x: f64, y: f64, button: Button, count: u32, flags: u64) {
     };
     let src = Source::new();
     let at = CGPoint { x, y };
-    move_to(x, y);
+    move_raw(x, y);
     ms(40);
     for n in 1..=count.clamp(1, 3) {
         for kind in [down, up] {
@@ -106,9 +112,9 @@ pub fn click(x: f64, y: f64, button: Button, count: u32, flags: u64) {
     }
 }
 
-pub fn drag(from: (f64, f64), to: (f64, f64)) {
+pub fn drag(_t: &Ticket, from: (f64, f64), to: (f64, f64)) {
     let src = Source::new();
-    move_to(from.0, from.1);
+    move_raw(from.0, from.1);
     ms(60);
     let at = CGPoint { x: from.0, y: from.1 };
     let down =
@@ -136,7 +142,7 @@ pub fn drag(from: (f64, f64), to: (f64, f64)) {
 }
 
 /// Scrolls by lines. Positive `dy` shows what is further down the page.
-pub fn scroll(dx: i32, dy: i32) {
+pub fn scroll(_t: &Ticket, dx: i32, dy: i32) {
     let src = Source::new();
     let (mut rx, mut ry) = (dx, dy);
     while rx != 0 || ry != 0 {
@@ -164,7 +170,7 @@ pub struct Chord {
     pub key: String,
 }
 
-pub fn press(chord: &Chord) {
+pub fn press(_t: &Ticket, chord: &Chord) {
     let src = Source::new();
     for down in [true, false] {
         let ev = unsafe { CGEventCreateKeyboardEvent(src.0, chord.code, down) };
@@ -205,7 +211,7 @@ fn us_key(ch: char) -> Option<(u16, bool)> {
 /// letter on any keyboard layout. A character that has a key on the US
 /// layout is also sent on that key, because some apps read the key and
 /// ignore the character. Calculator is one.
-pub fn type_text(text: &str) {
+pub fn type_text(_t: &Ticket, text: &str) {
     let src = Source::new();
     let send = |code: u16, flags: u64, units: &[u16]| {
         for down in [true, false] {

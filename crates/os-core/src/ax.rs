@@ -5,6 +5,7 @@
 // The constants keep the names Apple gives them.
 #![allow(non_upper_case_globals)]
 
+use crate::gate::Ticket;
 use crate::cf::{null, Cf};
 use crate::ffi::*;
 use crate::geom::Rect;
@@ -154,7 +155,7 @@ impl Element {
             .collect()
     }
 
-    pub fn perform(&self, action: &str) -> Result<(), String> {
+    pub fn perform(&self, _t: &Ticket, action: &str) -> Result<(), String> {
         let a = Cf::string(action);
         let e = unsafe { AXUIElementPerformAction(self.raw(), a.as_ptr()) };
         if e == kAXErrorSuccess {
@@ -164,7 +165,12 @@ impl Element {
         }
     }
 
-    pub fn set_flag(&self, name: &str, value: bool) -> Result<(), String> {
+    /// Sets a true or false attribute, such as AXFocused or AXHidden.
+    pub fn set_flag(&self, _t: &Ticket, name: &str, value: bool) -> Result<(), String> {
+        self.set_flag_raw(name, value)
+    }
+
+    fn set_flag_raw(&self, name: &str, value: bool) -> Result<(), String> {
         let k = Cf::string(name);
         let v = unsafe {
             if value {
@@ -181,7 +187,7 @@ impl Element {
         }
     }
 
-    pub fn set_text(&self, name: &str, value: &str) -> Result<(), String> {
+    pub fn set_text(&self, _t: &Ticket, name: &str, value: &str) -> Result<(), String> {
         let k = Cf::string(name);
         let v = Cf::string(value);
         let e = unsafe { AXUIElementSetAttributeValue(self.raw(), k.as_ptr(), v.as_ptr()) };
@@ -731,9 +737,28 @@ pub fn is_control(short: &str) -> bool {
 }
 
 /// Chromium and Electron apps build their tree only when asked.
+/// The flags that ask an app to build its accessibility tree.
+pub enum WakeFlag {
+    /// Electron honours this one.
+    Manual,
+    /// Chromium browsers need this one.
+    Enhanced,
+}
+
+/// Sets one wake flag. It changes nothing a person can see.
+pub fn wake_with(app: &Element, flag: WakeFlag) {
+    let name = match flag {
+        WakeFlag::Manual => "AXManualAccessibility",
+        WakeFlag::Enhanced => "AXEnhancedUserInterface",
+    };
+    let _ = app.set_flag_raw(name, true);
+}
+
+/// Asks Chromium and Electron apps to build their accessibility tree. This
+/// changes nothing a person can see, so it needs no ticket.
 pub fn wake(app: &Element) {
-    let _ = app.set_flag("AXManualAccessibility", true);
-    let _ = app.set_flag("AXEnhancedUserInterface", true);
+    let _ = app.set_flag_raw("AXManualAccessibility", true);
+    let _ = app.set_flag_raw("AXEnhancedUserInterface", true);
 }
 
 /// The window to read for an app: focused, else main, else the first one.
