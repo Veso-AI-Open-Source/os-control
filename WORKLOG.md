@@ -38,6 +38,99 @@ In priority order. Lead with any blocker.
 Where the next session picks up: files, docs, logs.
 -->
 
+# Worklog - 2026-10-16 - A verified core: one source of app identity, a ticket for every act, and acts that check their result
+
+> The session started from bugs met while driving real apps: an app on screen that the tools could not find, hide and activate calls that reported failure, and clicks whose result was never checked. Each symptom traced back to one cause. The app layer trusted unverified signals: the text output of `lsappinfo`, and success codes from calls that macOS can accept and then ignore. The fix moves that trust into types, so the compiler enforces it, and makes every act check what it changed.
+
+## TL;DR
+
+- App identity now comes from one place: the kernel's process list resolved through `NSRunningApplication`. Nothing parses another program's output.
+- Every input and every accessibility change takes a gate `Ticket`. Only the gate can make one, so an act that skips the gate does not compile.
+- Acts check their result and try the next way when one is ignored: activate, hide, and focus before typing. Clicks say whether the window changed.
+- Head-to-head on one Mac, same scenarios, independent checks: bring to front 8/12 to 12/12 (median 1.6 s to 0.15 s), tell the front app 0/12 to 12/12, truthful hide reports 0/9 to 9/9, typing into LibreOffice's Name Box 0/3 to 3/3.
+- 45 unit tests and 2 compile-fail doc tests are green. The live checks pass, 23 of 23.
+- Not done: the tool schema generated from types, a fake OS for fault tests, and two bugs found in agent runs (Next steps 1 and 2).
+
+## Threads / detail
+
+### The root cause
+
+- The first symptom: on an app's first launch through the Gatekeeper prompt, `lsappinfo list` printed the pid only inside `token=[... pid=N ...]`, with no `pid = N` line. The parser dropped the app, and every tool that takes an `app` name goes through that parser.
+- A regex for the token line would fix that one shape, not the class. There were three sources of truth for "which apps exist" (the `lsappinfo` text, `NSRunningApplication`, the window list) that could disagree in silence, and success codes were taken at face value.
+
+### One source of app identity
+
+- `AppInfo` gains a private field. Only `apps.rs` can make one, and only from a live `NSRunningApplication`, so a tool cannot invent an app.
+- The app list is `proc_listallpids`, plus the owners of on-screen windows as a second witness, each resolved through `NSRunningApplication`. An empty list is an error ("could not list the running apps"), never "no app matches".
+- The front app comes from the accessibility API's focused app, then from the app that NSWorkspace marks active. `Seen<T>` has three states: yes, no, and unknown. Unknown is never read as no.
+- The `lsappinfo` parser is gone. A test keeps a copy of it, with the output shape macOS printed, to show the bug.
+
+Files: `crates/os-core/src/apps.rs`.
+
+### A ticket for every act
+
+- `gate::admit` runs the gate and returns a `Ticket`. Every function that posts input (`click`, `type_text`, `press`, `scroll`, `drag`, `move_to`) and every accessibility change (`perform`, `set_flag`, `set_text`) takes one.
+- Scroll now passes the gate like every other act.
+- `wake` keeps a private path for the two flags that make Chromium and Electron build their tree. They change nothing a person can see.
+
+Files: `crates/os-core/src/{gate,input,ax}.rs`.
+
+### Acts check their result
+
+- `verify::ladder` tries the ways to cause an effect in order and polls a check after each. A way that returns Ok but changes nothing does not count. Unknown is reported as unknown.
+- Activate: the accessibility flag (250 ms), then AppKit (600 ms), then LaunchServices (1.2 s). On macOS 27 the accessibility flag is often accepted and ignored. That is why the old activate timed out.
+- Hide: the accessibility flag, then AppKit, then cmd+h once the app is in front. AppKit's `hide` returned NO while it hid the app, so the old tool said "could not hide" after hiding it.
+- Type with a target: put the focus on it and check before the first key. LibreOffice's Name Box ignores the accessibility focus, and a real click works. The result says when the field already held text, and reads the field back.
+- Click: a fingerprint of the front window before and after. The result ends with "Verified: the window changed." or "No change was seen within half a second."
+
+Files: `crates/os-core/src/{verify,exec}.rs`.
+
+### A lint against parsing program output
+
+- `clippy.toml` bans `std::process::Command::new`. The five places that start a program (`open`, `screencapture`, `sips`, the gate panel, and one `ps` call) are allowed by name, each with a reason. Adding `lsappinfo` parsing back fails the lint.
+
+## Snag log
+
+- In one of two head-to-head runs, the new version twice failed to find TextEdit within 2 ms, as if the process list came back empty. It did not happen again in 40 probe calls or in the second run. The retry and the second witness came from this. It needs a soak test.
+- Two of my checks were wrong. One expected typed text at the end of a document when the caret was at the start. One read a document too early. Reading the final state caught both, and the numbers here are corrected.
+- The click fingerprint looks only at the front window. A menu, another window, or a slow app can give "No change was seen". It is worded as a prompt to check, not as an error.
+- Change detection adds about 90 ms to a click that changes something, and up to 0.6 s to one that does not.
+
+## Verification
+
+- `cargo test -p os-core -p osctl`: 41 and 4 unit tests green, before 36 and 4. Two compile-fail doc tests green: a forged `Ticket` and a forged `AppInfo` do not compile.
+- `cargo clippy -p os-core -- -D clippy::disallowed_methods`: clean.
+- `tests/live.py` against the release build: 23 of 23, the same as the previous build. `--pointer` was not run.
+- Head-to-head: both builds ran as MCP servers through the same scenarios, three trials each, in alternating order. Independent checks read the result: System Events, TextEdit's scripting, and a read-only `see` from the old build.
+
+| Scenario | Before | After |
+|---|---|---|
+| Hide an app: worked, reported truthfully | 9/9, 0/9 | 9/9, 9/9 |
+| Bring an app to the front: worked, truthful, median time | 8/12, 4/12, 1616 ms | 12/12, 12/12, 149 ms |
+| Tell which app is in front | 0/12 | 12/12 |
+| Type into LibreOffice's Name Box | 0/3 | 3/3 |
+| Type into a field that already holds text | 0/3 | 3/3 |
+| A click that changes nothing is flagged | 0/3 | 3/3 |
+| A click that changes something is confirmed | 0/3 | 3/3 |
+
+- Not checked: other macOS versions, Intel Macs, long-running sessions.
+
+## Next steps
+
+1. `click` with an `id` ignores the `app` argument. An id from an earlier `see` of another app clicks in that app. Refuse when the element is not in the named app.
+2. The gate can fire on body text. A 12-word line of a PDF that contains "share" raised the sending stop. Judge only controls (buttons, links, menu items), or lower the prose cutoff.
+3. Soak test the app list in a long-lived server.
+4. Generate the MCP tool schema from typed argument structs.
+5. Put the OS behind a trait, so each effect can be tested against injected faults.
+6. Listen for accessibility notifications instead of polling for changes.
+
+## Pointers
+
+- `crates/os-core/src/apps.rs`: app identity and `Seen`.
+- `crates/os-core/src/verify.rs`: the ladder and its tests.
+- `crates/os-core/src/exec.rs`: `bring_front`, `digest`, `change_note`, `focus_on`, and hide in the `app` tool.
+- `clippy.toml`: the lint.
+
 # Worklog - 2026-10-12 - Built in a morning, used on a real job, then open sourced
 
 > The session set out to give Claude Code eyes and hands on a Mac, with brakes the agent cannot reach. It ran in five arcs. Arc A: the tools. Arc B: the hard stops. Arc C: the bar. Arc D: a first real job done with the tools. Arc E: the public release.
