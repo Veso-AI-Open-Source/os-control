@@ -6,6 +6,8 @@
 
 mod run;
 mod theme;
+#[allow(dead_code)]
+mod ui;
 
 use futures::channel::mpsc;
 use futures::StreamExt;
@@ -19,6 +21,7 @@ use os_core::state;
 use run::Ev;
 use std::time::Duration;
 use theme::{theme, Theme, BODY_SMALL, HEADER_BAR, LABEL_SMALL, RADIUS_CONTROL, TOP_BAR_LEADING};
+use ui::{Badge, Button, Tone};
 
 enum Item {
     User(String),
@@ -199,23 +202,10 @@ impl Bar {
         &self,
         id: &'static str,
         label: &'static str,
-        t: &Theme,
         cx: &mut Context<Self>,
         on_click: fn(&mut Self, &mut Context<Self>),
     ) -> impl IntoElement {
-        div()
-            .id(id)
-            .px_2()
-            .py_1()
-            .rounded(RADIUS_CONTROL)
-            .border_1()
-            .border_color(t.border)
-            .text_size(LABEL_SMALL)
-            .text_color(t.text)
-            .cursor_pointer()
-            .hover(|s| s.bg(t.element_hover))
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| on_click(this, cx)))
-            .child(label)
+        Button::new(id, label).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| on_click(this, cx)))
     }
 }
 
@@ -224,25 +214,24 @@ impl Render for Bar {
         let t = *theme(cx);
         let focused = self.focus.is_focused(window);
         let stopped = state::stopped();
-        let (chip, chip_color) = if stopped {
-            ("stopped", t.error)
+        let (chip, tone) = if stopped {
+            ("Stopped", Tone::Error)
         } else if self.running.is_some() {
-            ("working", t.accent)
+            ("Working", Tone::Accent)
         } else {
-            ("ready", t.success)
+            ("Ready", Tone::Success)
         };
 
         let mut buttons = div().flex().items_center().gap_2().pr_3();
         if self.running.is_some() && !stopped {
-            buttons = buttons.child(self.button("stop-run", "Stop", &t, cx, Self::stop_run));
+            buttons = buttons.child(self.button("stop-run", "Stop", cx, Self::stop_run));
         }
         if self.running.is_none() && !self.items.is_empty() {
-            buttons = buttons.child(self.button("new", "New", &t, cx, Self::new_session));
+            buttons = buttons.child(self.button("new", "New", cx, Self::new_session));
         }
         buttons = buttons.child(self.button(
             "stop-all",
             if stopped { "Resume" } else { "Stop everything" },
-            &t,
             cx,
             Self::toggle_stop_all,
         ));
@@ -275,7 +264,7 @@ impl Render for Bar {
                                     .font_weight(FontWeight::BOLD)
                                     .child("OS CONTROL"),
                             )
-                            .child(div().text_size(LABEL_SMALL).text_color(chip_color).child(chip)),
+                            .child(Badge::new(chip, tone)),
                     )
                     .child(buttons),
             )
@@ -370,7 +359,7 @@ impl Render for Bar {
 
 fn main() {
     Application::new().run(|cx: &mut App| {
-        cx.set_global(Theme::dark());
+        cx.set_global(Theme::for_appearance(cx.window_appearance()));
         // OSBAR_QUIET opens the bar without taking the focus from your work.
         let quiet = std::env::var_os("OSBAR_QUIET").is_some();
         let bounds = Bounds::centered(None, size(px(560.), px(440.)), cx);
@@ -387,6 +376,7 @@ fn main() {
                 ..Default::default()
             },
             |window, cx| {
+                theme::follow_system(window, cx);
                 let bar = cx.new(Bar::new);
                 let focus = bar.read(cx).focus.clone();
                 window.focus(&focus);
