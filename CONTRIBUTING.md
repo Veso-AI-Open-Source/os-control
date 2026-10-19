@@ -22,10 +22,21 @@ OS Control is a public library. Everything that lands here is public, so keep pe
 5. A UI change shows a screenshot or a short GIF in the pull request.
 6. When the work is ready, mark the pull request ready for review. Merge with **rebase**, so `main` keeps a straight history.
 7. Add a `WORKLOG.md` entry for any change worth a session's notes: newest first, using the template at the top.
+8. A change people will notice adds a line under `Unreleased` in `CHANGELOG.md`.
 
 ## UI branches
 
 A UI branch can carry a runnable example under `crates/os-bar/examples/`. Run it with `cargo run -p os-bar --example <name>`. CI builds every example, so a broken one fails the pull request.
+
+## Releases
+
+Versions follow [SemVer](https://semver.org/). The MCP server reports the workspace version to clients, so the version in `Cargo.toml` is the one people see.
+
+1. On a `docs/release-<version>` branch, set `version` in the root `Cargo.toml`, then run `cargo build` to update `Cargo.lock`.
+2. In `CHANGELOG.md`, move the `Unreleased` lines under a new version heading with the date, and update the links at the bottom.
+3. Open a pull request, wait for CI, and merge with rebase.
+4. Tag the merge on `main` and push the tag: `git tag -a v<version> -m "OS Control <version>"`, then `git push origin v<version>`.
+5. Publish a GitHub release from the tag, with that version's changelog entry as the notes.
 
 ## Commits
 
