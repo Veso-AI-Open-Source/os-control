@@ -20,7 +20,7 @@ OS Control is a public library. Everything that lands here is public, so keep pe
 3. CI builds every crate, test target, and example. It runs the unit tests, the lint that stops OS state being read by parsing program output, and a build of the gate panel. It also checks added lines for home paths and personal email addresses.
 4. CI cannot run the live checks, because they need Accessibility and Screen Recording grants. Run `make live` on your Mac and say so in the pull request.
 5. A UI change shows a screenshot or a short GIF in the pull request.
-6. When the work is ready, mark the pull request ready for review. Merge with **rebase**, so `main` keeps a straight history.
+6. When the work is ready, mark the pull request ready for review. Merge with **rebase**, so `main` keeps a straight history. GitHub's merge buttons record the merger's account email as the committer. Before you merge on the web, turn on "Keep my email addresses private" in GitHub's email settings. Or fast-forward from your machine: rebase the branch on `origin/main`, then `git push origin <branch>:main`. GitHub marks the pull request merged.
 7. Add a `WORKLOG.md` entry for any change worth a session's notes: newest first, using the template at the top.
 8. A change people will notice adds a line under `Unreleased` in `CHANGELOG.md`.
 
