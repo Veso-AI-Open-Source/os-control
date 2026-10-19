@@ -38,6 +38,79 @@ In priority order. Lead with any blocker.
 Where the next session picks up: files, docs, logs.
 -->
 
+# Worklog - 2026-10-20 - Release 0.2.0: the version, a changelog, the README, and the open work as issues
+
+> The verified core merged on 2026-10-16, but the repository still described 0.1.0. The version was not bumped, there was no changelog and there were no tags, and the known bugs were listed only in this worklog. This session brought the repository up to date.
+
+## TL;DR
+
+- The version is 0.2.0. The MCP server reports it in `serverInfo`, because it reads the Cargo version.
+- `CHANGELOG.md` follows the Keep a Changelog format. It has an `Unreleased` section and entries for 0.2.0 and 0.1.0.
+- README changes:
+  - a CI badge;
+  - a new point, "Acts check their result";
+  - the table of 0.2.0 against 0.1.0;
+  - new tool descriptions, limits and layout;
+  - links to the issues.
+- Nine issues, #4 to #12: four bugs, a gap in the gate, a soak test, and three pieces of planned work.
+- `CONTRIBUTING.md` now has a release process, and the pull request template asks for a changelog line.
+- Tags: `v0.1.0` on the first public commit, and `v0.2.0` on this release.
+
+## Threads / detail
+
+### Version
+
+`version` in the root `Cargo.toml` went from 0.1.0 to 0.2.0. `cargo build` then updated `Cargo.lock`, where only the three workspace crates changed. At run time the version shows in one place only: `serverInfo` in `crates/osctl/src/mcp.rs`, which uses `env!("CARGO_PKG_VERSION")`.
+
+This is a minor bump, not a patch, because the contributor API changed. Input functions take a `Ticket`, and `apps::find` returns a `Result`.
+
+### Changelog and README
+
+Each claim was checked before it went in, against the code or against the measurements from 2026-10-16. The README's new table is the same head-to-head as that entry. It adds the cost of checking: about 90 ms on a click that changes something, and up to 0.6 s before a tool reports that nothing changed.
+
+### Issues
+
+The open items from 2026-10-16 are now issues. Each one says what happens, why, and what test would show it fixed.
+
+- Bugs:
+  - #4 `click` with an id ignores `app`;
+  - #5 the gate fires on body text;
+  - #6 `format` catches menus;
+  - #8 a black screenshot comes back with no warning.
+- A gap in the gate: #7 system permission prompts are not gated.
+- A test: #9 soak test the app list.
+- Planned:
+  - #10 a typed tool schema;
+  - #11 macOS behind a trait;
+  - #12 accessibility notifications.
+
+### Onboarding
+
+The onboarding UI is still in progress. It is on `ui/onboarding` as draft pull request #3, rebased on this release.
+
+## Snag log
+
+- The first draft of the changelog said five allow-listed `Command::new` sites. A grep found six.
+
+## Verification
+
+- `cargo test --workspace`: 51 green (4, 41, 4, and 2 doc tests), none failing.
+- `cargo build --workspace` at 0.2.0: clean.
+- CI runs on the pull request.
+- No live checks were run. No code changed.
+
+## Next steps
+
+1. Fix the bugs: #4, #5, #6, #8.
+2. Gate the system permission prompts (#7).
+3. Run the soak test (#9).
+4. Finish the onboarding UI (#3): screenshots, review, merge.
+
+## Pointers
+
+- `CHANGELOG.md`: what changed in each version.
+- `CONTRIBUTING.md`, under Releases: how to cut the next release.
+
 # Worklog - 2026-10-16 - A verified core: one source of app identity, a ticket for every act, and acts that check their result
 
 > The session started from bugs met while driving real apps: an app on screen that the tools could not find, hide and activate calls that reported failure, and clicks whose result was never checked. Each symptom traced back to one cause. The app layer trusted unverified signals: the text output of `lsappinfo`, and success codes from calls that macOS can accept and then ignore. The fix moves that trust into types, so the compiler enforces it, and makes every act check what it changed.
