@@ -54,7 +54,7 @@ Where the next session picks up: files, docs, logs.
   - links to the issues.
 - Nine issues, #4 to #12: four bugs, a gap in the gate, a soak test, and three pieces of planned work.
 - `CONTRIBUTING.md` now has a release process, and the pull request template asks for a changelog line.
-- Tags: `v0.1.0` on the first public commit, and `v0.2.0` on this release.
+- Tags: `v0.1.0` on the last 0.1.0 commit, and `v0.2.0` on this release.
 
 ## Threads / detail
 
@@ -91,6 +91,7 @@ The onboarding UI is still in progress. It is on `ui/onboarding` as draft pull r
 ## Snag log
 
 - The first draft of the changelog said five allow-listed `Command::new` sites. A grep found six.
+- GitHub's web merge records the merger's account email as the committer, even when every pushed commit uses the noreply address. To correct the commit metadata, the history of `main` was rewritten on 2026-10-20. Trees, messages and dates were kept. Every commit ID from the fourth commit on changed, and both tags moved. If you cloned before then, run `git fetch origin && git reset --hard origin/main`. Merges now fast-forward `main` from a local branch, and CONTRIBUTING says how.
 
 ## Verification
 
